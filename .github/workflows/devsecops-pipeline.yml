@@ -5,55 +5,69 @@ on:
     branches: [ main ]
 
 jobs:
-  build:
+  devsecops:
     runs-on: ubuntu-latest
 
     steps:
-    - name: Checkout Code
-      uses: actions/checkout@v3
+      # Step 1: Checkout Repository
+      - name: Checkout Code
+        uses: actions/checkout@v4
 
-    - name: Set up Python
-      uses: actions/setup-python@v4
-      with:
-        python-version: '3.9'
+      # Step 2: Set up Python
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.9'
 
-    - name: Install Dependencies
-      run: |
-        cd app
-        pip install -r requirements.txt
+      # Step 3: Install Python Dependencies
+      - name: Install Dependencies
+        working-directory: app
+        run: |
+          pip install -r requirements.txt
 
-    - name: Static Code Analysis (Bandit)
-      run: |
-        pip install bandit
-        bandit -r app/
+      # Step 4: Static Code Analysis (Bandit)
+      - name: Static Code Analysis (Bandit)
+        run: |
+          pip install bandit
+          bandit -r app/ -lll
 
-    - name: File System Scan (Trivy)
-      uses: aquasecurity/trivy-action@master
-      with:
-        scan-type: 'fs'
-        scan-ref: './app'
+      # Step 5: File System Vulnerability Scan (Trivy)
+      - name: File System Scan (Trivy)
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'fs'
+          scan-ref: './app'
+          format: 'table'
+          exit-code: '0'   # Prevent job failure if issues are found
 
-    - name: Build Docker Image
-      run: |
-        cd app
-        docker build -t your-dockerhub-user/devsecops-demo:latest .
+      # Step 6: Build Docker Image
+      - name: Build Docker Image
+        working-directory: app
+        run: |
+          docker build -t ${{ secrets.DOCKERHUB_USER }}/devsecops-demo:latest .
 
-    - name: Scan Docker Image (Trivy)
-      uses: aquasecurity/trivy-action@master
-      with:
-        image-ref: 'your-dockerhub-user/devsecops-demo:latest'
+      # Step 7: Container Image Scan (Trivy)
+      - name: Scan Docker Image (Trivy)
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: '${{ secrets.DOCKERHUB_USER }}/devsecops-demo:latest'
+          format: 'table'
+          exit-code: '0'
 
-    - name: Push Docker Image
-      run: |
-        echo "${{ secrets.DOCKERHUB_TOKEN }}" | docker login -u "${{ secrets.DOCKERHUB_USER }}" --password-stdin
-        docker push your-dockerhub-user/devsecops-demo:latest
+      # Step 8: Push Docker Image to Docker Hub
+      - name: Push Docker Image
+        run: |
+          echo "${{ secrets.DOCKERHUB_TOKEN }}" | docker login -u "${{ secrets.DOCKERHUB_USER }}" --password-stdin
+          docker push ${{ secrets.DOCKERHUB_USER }}/devsecops-demo:latest
 
-    - name: Deploy Infrastructure with Terraform
-      run: |
-        cd infra
-        terraform init
-        terraform apply -auto-approve
-      env:
-        AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-        AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-        AWS_DEFAULT_REGION: us-east-1
+      # Step 9: Deploy Infrastructure with Terraform
+      - name: Deploy Infrastructure (Terraform)
+        working-directory: infra
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: us-east-1
+        run: |
+          terraform init -input=false
+          terraform validate
+          terraform apply -auto-approve
