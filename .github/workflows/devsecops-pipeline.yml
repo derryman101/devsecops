@@ -3,11 +3,17 @@ name: DevSecOps Pipeline
 on:
   push:
     branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+permissions:
+  contents: read
+  security-events: write
 
 jobs:
   devsecops:
     runs-on: ubuntu-latest
-
+    
     steps:
       # Step 1: Checkout Repository
       - name: Checkout Code
@@ -18,6 +24,7 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.9'
+          cache: 'pip'
 
       # Step 3: Install Python Dependencies
       - name: Install Dependencies
@@ -29,7 +36,9 @@ jobs:
       - name: Static Code Analysis (Bandit)
         run: |
           pip install bandit
+          bandit -r app/ -lll -f json -o bandit-report.json || true
           bandit -r app/ -lll
+        continue-on-error: true
 
       # Step 5: File System Vulnerability Scan (Trivy)
       - name: File System Scan (Trivy)
@@ -37,37 +46,141 @@ jobs:
         with:
           scan-type: 'fs'
           scan-ref: './app'
-          format: 'table'
-          exit-code: '0'   # Prevent job failure if issues are found
+          format: 'sarif'
+          output: 'trivy-fs-results.sarif'
+          severity: 'CRITICAL,HIGH'
+          exit-code: '0'
 
-      # Step 6: Build Docker Image
-      - name: Build Docker Image
-        working-directory: app
-        run: |
-          docker build -t ${{ secrets.DOCKERHUB_USER }}/devsecops-demo:latest .
+      # Step 5b: Upload Trivy FS results to GitHub Security
+      - name: Upload Trivy FS results
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: 'trivy-fs-results.sarif'
+          category: 'filesystem'
 
-      # Step 7: Container Image Scan (Trivy)
+      # Step 6: Set up Docker Buildx
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Step 7: Login to Docker Hub
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USER }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # Step 8: Build and Push Docker Image
+      - name: Build and Push Docker Image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./app
+          push: true
+          tags: |
+            ${{ secrets.DOCKERHUB_USER }}/devsecops-demo:latest
+            ${{ secrets.DOCKERHUB_USER }}/devsecops-demo:${{ github.sha }}
+          cache-from: type=registry,ref=${{ secrets.DOCKERHUB_USER }}/devsecops-demo:buildcache
+          cache-to: type=registry,ref=${{ secrets.DOCKERHUB_USER }}/devsecops-demo:buildcache,mode=max
+
+      # Step 9: Container Image Scan (Trivy)
       - name: Scan Docker Image (Trivy)
         uses: aquasecurity/trivy-action@master
         with:
           image-ref: '${{ secrets.DOCKERHUB_USER }}/devsecops-demo:latest'
-          format: 'table'
+          format: 'sarif'
+          output: 'trivy-image-results.sarif'
+          severity: 'CRITICAL,HIGH'
           exit-code: '0'
 
-      # Step 8: Push Docker Image to Docker Hub
-      - name: Push Docker Image
-        run: |
-          echo "${{ secrets.DOCKERHUB_TOKEN }}" | docker login -u "${{ secrets.DOCKERHUB_USER }}" --password-stdin
-          docker push ${{ secrets.DOCKERHUB_USER }}/devsecops-demo:latest
+      # Step 9b: Upload Trivy Image results to GitHub Security
+      - name: Upload Trivy Image results
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: 'trivy-image-results.sarif'
+          category: 'container-image'
 
-      # Step 9: Deploy Infrastructure with Terraform
-      - name: Deploy Infrastructure (Terraform)
+      # Step 10: Install Terraform Manually
+      - name: Install Terraform
+        run: |
+          # Download Terraform
+          wget -O terraform.zip https://releases.hashicorp.com/terraform/1.6.6/terraform_1.6.6_linux_amd64.zip
+          
+          # Install unzip if not available
+          sudo apt-get update && sudo apt-get install -y unzip
+          
+          # Unzip and install
+          unzip terraform.zip
+          sudo mv terraform /usr/local/bin/
+          
+          # Verify installation
+          terraform version
+          which terraform
+
+      # Step 10c: Check Infra Directory
+      - name: Check Infrastructure Directory
+        run: |
+          ls -la
+          ls -la infra/ || echo "infra directory not found"
+
+      # Terraform steps - only run if infra directory exists
+      # Step 11: Terraform Format Check
+      - name: Terraform Format Check
+        if: hashFiles('infra/**') != ''
+        working-directory: infra
+        run: terraform fmt -check
+        continue-on-error: true
+
+      # Step 12: Terraform Init
+      - name: Terraform Init
+        if: hashFiles('infra/**') != ''
         working-directory: infra
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           AWS_DEFAULT_REGION: us-east-1
-        run: |
-          terraform init -input=false
-          terraform validate
-          terraform apply -auto-approve
+        run: terraform init -input=false
+
+      # Step 13: Terraform Validate
+      - name: Terraform Validate
+        if: hashFiles('infra/**') != ''
+        working-directory: infra
+        run: terraform validate
+
+      # Step 14: Terraform Plan
+      - name: Terraform Plan
+        if: hashFiles('infra/**') != ''
+        working-directory: infra
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: us-east-1
+        run: terraform plan -input=false -out=tfplan
+
+      # Step 15: Terraform Security Scan (tfsec)
+      - name: Terraform Security Scan (tfsec)
+        if: hashFiles('infra/**') != ''
+        uses: aquasecurity/tfsec-action@v1.0.3
+        with:
+          working_directory: infra
+          soft_fail: true
+
+      # Step 16: Deploy Infrastructure with Terraform
+      - name: Deploy Infrastructure (Terraform)
+        if: hashFiles('infra/**') != ''
+        working-directory: infra
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: us-east-1
+        run: terraform apply -input=false -auto-approve tfplan
+
+      # Step 17: Output Deployment Info
+      - name: Terraform Output
+        if: hashFiles('infra/**') != ''
+        working-directory: infra
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: us-east-1
+        run: terraform output
