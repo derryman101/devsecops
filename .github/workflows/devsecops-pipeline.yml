@@ -1,0 +1,59 @@
+name: DevSecOps Pipeline
+
+on:
+  push:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout Code
+      uses: actions/checkout@v3
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.9'
+
+    - name: Install Dependencies
+      run: |
+        cd app
+        pip install -r requirements.txt
+
+    - name: Static Code Analysis (Bandit)
+      run: |
+        pip install bandit
+        bandit -r app/
+
+    - name: File System Scan (Trivy)
+      uses: aquasecurity/trivy-action@master
+      with:
+        scan-type: 'fs'
+        scan-ref: './app'
+
+    - name: Build Docker Image
+      run: |
+        cd app
+        docker build -t your-dockerhub-user/devsecops-demo:latest .
+
+    - name: Scan Docker Image (Trivy)
+      uses: aquasecurity/trivy-action@master
+      with:
+        image-ref: 'your-dockerhub-user/devsecops-demo:latest'
+
+    - name: Push Docker Image
+      run: |
+        echo "${{ secrets.DOCKERHUB_TOKEN }}" | docker login -u "${{ secrets.DOCKERHUB_USER }}" --password-stdin
+        docker push your-dockerhub-user/devsecops-demo:latest
+
+    - name: Deploy Infrastructure with Terraform
+      run: |
+        cd infra
+        terraform init
+        terraform apply -auto-approve
+      env:
+        AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        AWS_DEFAULT_REGION: us-east-1
